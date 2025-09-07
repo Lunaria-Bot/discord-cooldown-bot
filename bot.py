@@ -25,11 +25,15 @@ def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r") as f:
             return json.load(f)
-    return {"cooldowns": {}, "settings": {}, "default_cooldowns": {
-        "Refreshing Box": 60,
-        "Premium Pack": 60,
-        "Summon": 1800,
-    }}
+    return {
+        "cooldowns": {},
+        "settings": {},
+        "default_cooldowns": {
+            "Refreshing Box": 60,
+            "Premium Pack": 60,
+            "Summon": 1800,
+        },
+    }
 
 def save_data():
     with open(DATA_FILE, "w") as f:
@@ -149,18 +153,28 @@ async def on_message(message: discord.Message):
 # ----------------------------
 # Slash commands
 # ----------------------------
-@bot.tree.command(name="settings", description="Toggle whether you want DM reminders")
-@discord.app_commands.describe(dm="Enable or disable DM reminders (true/false)")
-async def settings(interaction: discord.Interaction, dm: bool):
+@bot.tree.command(name="settings", description="View or change your DM reminder settings")
+@discord.app_commands.describe(dm="Enable or disable DM reminders (true/false). Leave empty to view current setting.")
+async def settings(interaction: discord.Interaction, dm: bool = None):
     uid = str(interaction.user.id)
+
+    # Initialize if not present
     if uid not in data["settings"]:
-        data["settings"][uid] = {}
-    data["settings"][uid]["dm_enabled"] = dm
-    save_data()
-    await interaction.response.send_message(
-        f"✅ DM reminders are now {'enabled' if dm else 'disabled'}.",
-        ephemeral=True
-    )
+        data["settings"][uid] = {"dm_enabled": True}
+
+    if dm is None:
+        current = data["settings"][uid].get("dm_enabled", True)
+        await interaction.response.send_message(
+            f"🔧 Your DM reminders are currently **{'enabled' if current else 'disabled'}**.",
+            ephemeral=True
+        )
+    else:
+        data["settings"][uid]["dm_enabled"] = dm
+        save_data()
+        await interaction.response.send_message(
+            f"✅ DM reminders are now {'enabled' if dm else 'disabled'}.",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="checkcooldowns", description="Check your active cooldowns")
 async def checkcooldowns(interaction: discord.Interaction):
