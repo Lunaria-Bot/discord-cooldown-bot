@@ -6,11 +6,8 @@ import time
 import json
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", 0))
-MAZOKU_BOT_ID = 1242388858897956906
-
-SETTINGS_FILE = "settings.json"
-COOLDOWNS_FILE = "cooldowns.json"
+GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", 0))   # set this to your server ID for instant sync
+MAZOKU_BOT_ID = 1242388858897956906                # replace if different
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -20,8 +17,29 @@ client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 
 # ----------------------------
-# Cooldowns + Aliases
+# Persistence helpers
 # ----------------------------
+SETTINGS_FILE = "settings.json"
+COOLDOWNS_FILE = "cooldowns.json"
+
+def load_json(path, default):
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+def save_json(path, data):
+    try:
+        with open(path, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"❌ Failed to save {path}: {e}", flush=True)
+
+# ----------------------------
+# Data
+# ----------------------------
+# per-command default cooldowns (seconds)
 COOLDOWN_SECONDS = {
     "Refreshing Box": 60,
     "summer": 1800,
@@ -29,6 +47,7 @@ COOLDOWN_SECONDS = {
     "Premium Pack": 60,
 }
 
+# Aliases: internal Mazoku command -> display name
 ALIASES = {
     "open-boxes": "Refreshing Box",
     "summer": "summer",
@@ -36,100 +55,41 @@ ALIASES = {
     "premium-pack": "Premium Pack",
 }
 
-# ----------------------------
-# Persistent data
-# ----------------------------
-user_settings = {}   # user_id -> {"dm_reminders": bool}
-cooldowns = {}       # (user_id, command) -> end_timestamp
-
-def load_settings():
-    global user_settings
-    try:
-        with open(SETTINGS_FILE, "r") as f:
-            user_settings = json.load(f)
-        print("✅ Loaded user settings from file.", flush=True)
-    except FileNotFoundError:
-        user_settings = {}
-        print("ℹ️ No settings file found, starting fresh.", flush=True)
-
-def save_settings():
-    try:
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(user_settings, f)
-        print("💾 User settings saved.", flush=True)
-    except Exception as e:
-        print(f"❌ Failed to save settings: {e}", flush=True)
-
-def load_cooldowns():
-    global cooldowns
-    try:
-        with open(COOLDOWNS_FILE, "r") as f:
-            raw = json.load(f)
-        now = time.time()
-        cooldowns = {
-            (int(uid), cmd): end
-            for (uid, cmd), end in raw.items()
-            if end > now  # skip expired cooldowns
-        }
-        print(f"✅ Loaded {len(cooldowns)} active cooldowns from file.", flush=True)
-    except FileNotFoundError:
-        cooldowns = {}
-        print("ℹ️ No cooldowns file found, starting fresh.", flush=True)
-    except Exception as e:
-        cooldowns = {}
-        print(f"❌ Failed to load cooldowns: {e}", flush=True)
-
-def save_cooldowns():
-    try:
-        raw = { (str(uid), cmd): end for (uid, cmd), end in cooldowns.items() }
-        with open(COOLDOWNS_FILE, "w") as f:
-            json.dump(raw, f)
-        print("💾 Cooldowns saved.", flush=True)
-    except Exception as e:
-        print(f"❌ Failed to save cooldowns: {e}", flush=True)
-
-def wants_dm(user_id: int) -> bool:
-    return user_settings.get(str(user_id), {}).get("dm_reminders", True)
+# Persistence
+user_settings = load_json(SETTINGS_FILE, {})       # {user_id: {"dm_reminders": bool}}
+cooldowns = load_json(COOLDOWNS_FILE, {})          # {(user_id, command): end_timestamp}
 
 # ----------------------------
 # Utility helpers
 # ----------------------------
+def save_settings():
+    save_json(SETTINGS_FILE, user_settings)
+
+def save_cooldowns():
+    save_json(COOLDOWNS_FILE, cooldowns)
+
 def get_interaction_from_message(message: discord.Message):
-    inter = getattr(message, "interaction_metadata", None)
+    inter = getattr(message, "interaction", None)
     if inter:
         return inter
-    return getattr(message, "interaction", None)
+    return getattr(message, "interaction_metadata", None)
+
+def wants_dm(user_id: int) -> bool:
+    return user_settings.get(str(user_id), {}).get("dm_reminders", True)
+
+def cleanup_expired_cooldowns():
+    now = time.time()
+    expired = [(k, v) for k, v in cooldowns.items() if v <= now]
+    for k, _ in expired:
+        cooldowns.pop(k, None)
+    if expired:
+        save_cooldowns()
 
 # ----------------------------
 # Events
 # ----------------------------
 @client.event
 async def on_ready():
-    load_settings()
-    load_cooldowns()
-
-    # restart timers for active cooldowns
-    now = time.time()
-    for (uid, cmd), end in list(cooldowns.items()):
-        remaining = end - now
-        if remaining > 0:
-            async def reminder_task(user_id=uid, command=cmd, wait=remaining):
-                await asyncio.sleep(wait)
-                if cooldowns.get((user_id, command), 0) <= time.time():
-                    cooldowns.pop((user_id, command), None)
-                    save_cooldowns()
-                    reminder = f"✅ Your cooldown for `{command}` is over — you can use it again."
-                    try:
-                        user = await client.fetch_user(user_id)
-                        if wants_dm(user_id):
-                            await user.send(reminder)
-                        else:
-                            # fallback: no channel reference, so just DM attempt
-                            await user.send(reminder)
-                    except Exception:
-                        pass
-            client.loop.create_task(reminder_task())
-
     try:
         if GUILD_ID:
             await tree.sync(guild=discord.Object(id=GUILD_ID))
@@ -148,6 +108,15 @@ async def on_message(message: discord.Message):
     if message.author.id == client.user.id:
         return
 
+    # DEBUG logging
+    print(
+        f"[DEBUG] From {message.author} ({message.author.id}) content={repr(message.content)} "
+        f"embeds={len(message.embeds)} interaction={getattr(message,'interaction',None)} "
+        f"interaction_metadata={getattr(message,'interaction_metadata',None)}",
+        flush=True,
+    )
+
+    # only handle Mazoku bot messages
     if message.author.bot and message.author.id == MAZOKU_BOT_ID:
         inter = get_interaction_from_message(message)
         if not inter:
@@ -159,104 +128,105 @@ async def on_message(message: discord.Message):
             return
 
         if cmd_name in ALIASES:
-            display_name = ALIASES[cmd_name]
-        else:
-            return
+            display = ALIASES[cmd_name]
+            if display not in COOLDOWN_SECONDS:
+                return
 
-        if display_name not in COOLDOWN_SECONDS:
-            return
+            now = time.time()
+            key = (str(user.id), display)
+            end = cooldowns.get(str(key), 0)
 
-        now = time.time()
-        key = (user.id, display_name)
-        end = cooldowns.get(key, 0)
-
-        if end > now:
-            remaining = int(end - now)
-            msg = f"⏳ {user.mention}, you're still on cooldown for `{display_name}` ({remaining}s left)."
-            try:
+            if end > now:
+                remaining = int(end - now)
                 if wants_dm(user.id):
-                    await user.send(msg)
-                else:
-                    await message.channel.send(msg)
-            except Exception:
-                pass
-            return
-
-        cd = COOLDOWN_SECONDS[display_name]
-        cooldowns[key] = now + cd
-        save_cooldowns()
-
-        start_msg = f"⚡ Cooldown started for `{display_name}` — I'll remind you in {cd} seconds."
-        try:
-            if wants_dm(user.id):
-                await user.send(start_msg)
-            else:
-                await message.channel.send(f"{user.mention} {start_msg}")
-        except Exception:
-            pass
-
-        async def reminder_task():
-            await asyncio.sleep(cd)
-            if cooldowns.get(key, 0) <= time.time():
-                cooldowns.pop(key, None)
-                save_cooldowns()
-                reminder = f"✅ Your cooldown for `{display_name}` is over — you can use it again."
-                try:
-                    if wants_dm(user.id):
-                        await user.send(reminder)
-                    else:
-                        await message.channel.send(f"{user.mention} {reminder}")
-                except discord.Forbidden:
                     try:
-                        await message.channel.send(f"✅ {user.mention}, cooldown for `{display_name}` is over! (Couldn't DM you.)")
+                        await user.send(f"⏳ You're still on cooldown for **{display}** ({remaining}s left).")
+                        return
+                    except discord.Forbidden:
+                        pass
+                await message.channel.send(f"⏳ {user.mention}, you're still on cooldown for **{display}** ({remaining}s left).")
+                return
+
+            # Start cooldown
+            cd = COOLDOWN_SECONDS[display]
+            cooldowns[str(key)] = now + cd
+            save_cooldowns()
+
+            if wants_dm(user.id):
+                try:
+                    await user.send(f"⚡ Cooldown started for **{display}** — I'll remind you in {cd} seconds.")
+                except discord.Forbidden:
+                    await message.channel.send(f"⚡ {user.mention}, cooldown started for **{display}** — I'll remind you in {cd} seconds. (Couldn't DM you.)")
+            else:
+                await message.channel.send(f"⚡ {user.mention}, cooldown started for **{display}** — I'll remind you in {cd} seconds.")
+
+            # Schedule reminder
+            async def reminder():
+                await asyncio.sleep(cd)
+                cleanup_expired_cooldowns()
+                if cooldowns.get(str(key), 0) <= time.time():
+                    cooldowns.pop(str(key), None)
+                    save_cooldowns()
+                    if wants_dm(user.id):
+                        try:
+                            await user.send(f"✅ Your cooldown for **{display}** is over — you can use it again.")
+                            return
+                        except discord.Forbidden:
+                            pass
+                    try:
+                        await message.channel.send(f"✅ {user.mention}, cooldown for **{display}** is over!")
                     except Exception:
                         pass
 
-        client.loop.create_task(reminder_task())
+            client.loop.create_task(reminder())
 
 # ----------------------------
 # Slash commands
 # ----------------------------
-@tree.command(name="setcooldown", description="Set a cooldown time for a command (seconds). Admins only recommended.")
-@discord.app_commands.describe(command="Command name (alias or display)", seconds="Seconds")
+@tree.command(name="setcooldown", description="Set a cooldown time for a command (seconds).")
+@discord.app_commands.describe(command="Command name", seconds="Seconds")
 async def set_cooldown(interaction: discord.Interaction, command: str, seconds: int):
+    if command not in COOLDOWN_SECONDS:
+        await interaction.response.send_message("❌ Unknown command.", ephemeral=True)
+        return
     if seconds < 0:
         await interaction.response.send_message("❌ Cooldown must be >= 0.", ephemeral=True)
         return
-    if command in ALIASES:
-        command = ALIASES[command]
+
     COOLDOWN_SECONDS[command] = seconds
-    await interaction.response.send_message(f"✅ Cooldown for `{command}` updated to {seconds} seconds.", ephemeral=True)
+    await interaction.response.send_message(f"✅ Cooldown for **{command}** updated to {seconds} seconds.", ephemeral=True)
+
 
 @tree.command(name="checkcooldowns", description="Check your active cooldowns")
 async def check_cooldowns(interaction: discord.Interaction):
-    user_id = interaction.user.id
+    user_id = str(interaction.user.id)
     now = time.time()
     active = []
-    for (uid, cmd), end_time in list(cooldowns.items()):
+    for key, end_time in cooldowns.items():
+        uid, cmd = eval(key)  # stored as str((uid, cmd))
         if uid == user_id and end_time > now:
             active.append(f"{cmd}: {int(end_time - now)}s")
+
     if not active:
         await interaction.response.send_message("✅ You have no active cooldowns!", ephemeral=True)
     else:
         await interaction.response.send_message("⏳ Your active cooldowns:\n" + "\n".join(active), ephemeral=True)
 
+
 @tree.command(name="settings", description="Change your cooldown reminder settings")
-@discord.app_commands.describe(dm="Enable or disable DM reminders (on/off)")
-async def settings(interaction: discord.Interaction, dm: str):
+@discord.app_commands.describe(dm="Enable or disable DM reminders (True = on, False = off)")
+async def settings(interaction: discord.Interaction, dm: bool):
     uid = str(interaction.user.id)
     if uid not in user_settings:
         user_settings[uid] = {"dm_reminders": True}
-    if dm.lower() in ["on", "true", "yes"]:
-        user_settings[uid]["dm_reminders"] = True
-        save_settings()
-        await interaction.response.send_message("✅ Cooldown reminders will now be sent via DM.", ephemeral=True)
-    elif dm.lower() in ["off", "false", "no"]:
-        user_settings[uid]["dm_reminders"] = False
-        save_settings()
-        await interaction.response.send_message("✅ Cooldown reminders will now be sent in the channel only.", ephemeral=True)
+
+    user_settings[uid]["dm_reminders"] = dm
+    save_settings()
+
+    if dm:
+        await interaction.response.send_message("✅ Cooldown reminders will now be sent via **DM**.", ephemeral=True)
     else:
-        await interaction.response.send_message("❌ Please specify `on` or `off` for DM reminders.", ephemeral=True)
+        await interaction.response.send_message("✅ Cooldown reminders will now be sent in the **channel only**.", ephemeral=True)
 
 # ----------------------------
 # Run
