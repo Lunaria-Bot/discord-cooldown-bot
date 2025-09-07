@@ -3,8 +3,8 @@ import asyncio
 import os
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-OTHER_BOT_ID = 1242388858897956906  # 👈 Replace with the ID of the other bot
-COOLDOWN_SECONDS = 60  # 50-second cooldown
+OTHER_BOT_ID = 123456789012345678  # 👈 Replace with the ID of the other bot
+COOLDOWN_SECONDS = 50  # 50-second cooldown
 
 intents = discord.Intents.default()
 intents.messages = True
