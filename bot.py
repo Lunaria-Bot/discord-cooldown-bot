@@ -52,7 +52,8 @@ def load_data():
         try:
             with open(DATA_FILE, "r") as f:
                 data = json.load(f)
-                cooldowns = {tuple(map(int, k.split(":"))): v for k, v in data.get("cooldowns", {}).items()}
+                cooldowns = {tuple(k.split(":", 1)): v for k, v in data.get("cooldowns", {}).items()}
+                cooldowns = {(int(uid), cmd): ts for (uid, cmd), ts in cooldowns.items()}
                 user_settings = {int(k): v for k, v in data.get("user_settings", {}).items()}
         except Exception as e:
             print(f"❌ Failed to load data: {e}", flush=True)
@@ -74,10 +75,10 @@ def save_data():
 # Utility
 # ----------------------------
 def get_interaction_from_message(message: discord.Message):
-    inter = getattr(message, "interaction", None)
+    inter = getattr(message, "interaction_metadata", None)
     if inter:
         return inter
-    return getattr(message, "interaction_metadata", None)
+    return getattr(message, "interaction", None)
 
 
 async def notify_user(user: discord.User, channel: discord.TextChannel, text: str):
@@ -104,8 +105,8 @@ async def on_ready():
     try:
         if GUILD_ID:
             guild = discord.Object(id=GUILD_ID)
-            await tree.sync(guild=guild)
-            print(f"📜 Slash commands synced to guild {GUILD_ID}", flush=True)
+            await tree.sync(guild=guild)  # force sync to guild
+            print(f"📜 Slash commands synced instantly to guild {GUILD_ID}", flush=True)
         else:
             await tree.sync()
             print("📜 Slash commands synced globally (may take up to 1 hour).", flush=True)
@@ -167,9 +168,9 @@ async def on_message(message: discord.Message):
 
 
 # ----------------------------
-# Slash commands
+# Slash commands (guild scoped)
 # ----------------------------
-@tree.command(name="setcooldown", description="Set a cooldown time for a command (seconds). Admins only recommended.")
+@tree.command(name="setcooldown", description="Set a cooldown time for a command (seconds). Admins only recommended.", guild=discord.Object(id=GUILD_ID))
 @discord.app_commands.describe(command="Command name", seconds="Cooldown time in seconds")
 async def set_cooldown(interaction: discord.Interaction, command: str, seconds: int):
     COOLDOWN_SECONDS[command] = seconds
@@ -177,7 +178,7 @@ async def set_cooldown(interaction: discord.Interaction, command: str, seconds: 
     await interaction.response.send_message(f"✅ Cooldown for **{command}** set to {seconds}s.", ephemeral=True)
 
 
-@tree.command(name="checkcooldowns", description="Check your active cooldowns")
+@tree.command(name="checkcooldowns", description="Check your active cooldowns", guild=discord.Object(id=GUILD_ID))
 async def check_cooldowns(interaction: discord.Interaction):
     now = time.time()
     active = []
@@ -190,13 +191,26 @@ async def check_cooldowns(interaction: discord.Interaction):
         await interaction.response.send_message("⏳ Active cooldowns:\n" + "\n".join(active), ephemeral=True)
 
 
-@tree.command(name="settings", description="Change your personal settings")
+@tree.command(name="settings", description="Change your personal settings", guild=discord.Object(id=GUILD_ID))
 @discord.app_commands.describe(dm="Enable or disable DM notifications")
 async def settings(interaction: discord.Interaction, dm: bool):
     user_settings.setdefault(interaction.user.id, {})["dm"] = dm
     save_data()
     state = "enabled" if dm else "disabled"
     await interaction.response.send_message(f"✅ DM notifications {state}.", ephemeral=True)
+
+
+@tree.command(name="reload", description="Force reload and resync all commands (admin only)", guild=discord.Object(id=GUILD_ID))
+async def reload(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message("❌ You don’t have permission to use this command.", ephemeral=True)
+        return
+    try:
+        guild = discord.Object(id=GUILD_ID)
+        await tree.sync(guild=guild)
+        await interaction.response.send_message("✅ Commands reloaded and synced to guild.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Failed to reload commands: {e}", ephemeral=True)
 
 
 # ----------------------------
