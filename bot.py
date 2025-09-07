@@ -3,16 +3,13 @@ import asyncio
 import os
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-MAZOKU_BOT_ID = 1429838858897596960  # Replace with Mazoku's bot ID
+MAZOKU_BOT_ID = 1429838858897596960  # Mazoku bot ID
 COOLDOWN_SECONDS = 60  # 60-second cooldown
 
-intents = discord.Intents.default()
-intents.messages = True
-intents.message_content = True
-
+# Enable all intents
+intents = discord.Intents.all()
 client = discord.Client(intents=intents)
 
-# Store cooldowns per user
 cooldowns = {}
 
 @client.event
@@ -21,22 +18,21 @@ async def on_ready():
 
 @client.event
 async def on_message(message: discord.Message):
+    # Debug log everything the bot sees
+    print(f"[DEBUG] From {message.author} ({message.author.id})")
+    print(f"Content: {message.content}")
+    print(f"Embeds: {len(message.embeds)}")
+
     # Ignore self
     if message.author.id == client.user.id:
         return
 
-    # Only check messages from the Mazoku bot
+    # Only watch Mazoku’s messages
     if message.author.bot and message.author.id == MAZOKU_BOT_ID:
-        print("------ Mazoku Message Debug ------")
-        print(f"Content: {message.content}")
-        print(f"Embeds: {len(message.embeds)}")
         for i, embed in enumerate(message.embeds):
-            print(f"Embed {i} title: {embed.title}")
-            print(f"Embed {i} description: {embed.description}")
-            print(f"Embed {i} fields: {embed.fields}")
-        print("----------------------------------")
+            print(f"Embed {i} -> title: {embed.title}, desc: {embed.description}, fields: {embed.fields}")
 
-        # Look for "Refreshing Box Opened" either in content or embed
+        # Trigger when "Refreshing Box Opened" appears
         if "Refreshing Box Opened" in message.content:
             await handle_cooldown(message)
         else:
@@ -45,13 +41,10 @@ async def on_message(message: discord.Message):
                     await handle_cooldown(message)
 
 async def handle_cooldown(message: discord.Message):
-    user = None
+    user = message.author  # fallback
 
-    # Try to detect who opened the box
     if message.mentions:
         user = message.mentions[0]
-    else:
-        user = message.author  # fallback
 
     if user.id in cooldowns:
         await message.channel.send(
