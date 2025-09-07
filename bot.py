@@ -1,3 +1,4 @@
+# bot.py
 import discord
 import asyncio
 import os
@@ -6,7 +7,7 @@ import json
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", 0))
-MAZOKU_BOT_ID = 1242388858897956906
+MAZOKU_BOT_ID = 1242388858897956906  # Update if needed
 
 DATA_FILE = "botdata.json"
 
@@ -18,63 +19,57 @@ client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 
 # ----------------------------
-# Data storage
+# Persistence
+# ----------------------------
+data = {"cooldowns": {}, "user_settings": {}}
+
+def load_data():
+    global data
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r") as f:
+                data = json.load(f)
+        except Exception:
+            print("❌ Failed to load botdata.json, starting fresh.")
+            data = {"cooldowns": {}, "user_settings": {}}
+    else:
+        # Create file with defaults
+        save_data()
+        print("📂 Created new botdata.json with defaults.")
+
+def save_data():
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f)
+
+def get_user_settings(user_id: int):
+    return data["user_settings"].get(str(user_id), {"dm": True})
+
+def set_user_settings(user_id: int, settings: dict):
+    data["user_settings"][str(user_id)] = settings
+    save_data()
+
+# ----------------------------
+# Cooldown setup
 # ----------------------------
 COOLDOWN_SECONDS = {
     "Refreshing Box": 60,
     "summer": 1800,
     "summon": 1800,
-    "Premium Pack": 60,
+    "Premium pack": 60,
 }
 
-# (user_id, command) -> end_timestamp
-cooldowns = {}
-# user_id -> settings
-user_settings = {}
+ALIASES = {
+    "open-boxes": "Refreshing Box",
+    "summer": "summer",
+    "summon": "summon",
+    "premium-pack": "Premium pack",
+}
 
-def load_data():
-    global cooldowns, user_settings
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r") as f:
-                data = json.load(f)
-                cooldowns = data.get("cooldowns", {})
-                user_settings = data.get("user_settings", {})
-            print("📂 Loaded data from disk.", flush=True)
-        except Exception as e:
-            print(f"⚠️ Failed to load data: {e}", flush=True)
-
-def save_data():
-    try:
-        with open(DATA_FILE, "w") as f:
-            json.dump({"cooldowns": cooldowns, "user_settings": user_settings}, f)
-        print("💾 Data saved to disk.", flush=True)
-    except Exception as e:
-        print(f"⚠️ Failed to save data: {e}", flush=True)
-
-# ----------------------------
-# Utility helpers
-# ----------------------------
 def get_interaction_from_message(message: discord.Message):
-    return getattr(message, "interaction", None) or getattr(message, "interaction_metadata", None)
-
-async def send_dm_or_channel(user: discord.User, channel: discord.TextChannel, msg: str):
-    """Try to DM user, fallback to channel if DMs blocked. Logs success/fail."""
-    dm_enabled = user_settings.get(str(user.id), {}).get("dm", True)
-
-    if dm_enabled:
-        try:
-            await user.send(msg)
-            print(f"[DM SUCCESS] Sent DM to {user} ({user.id}) -> {msg}", flush=True)
-            return
-        except discord.Forbidden:
-            print(f"[DM FAIL] Cannot DM {user} ({user.id}), falling back.", flush=True)
-
-    try:
-        await channel.send(f"{user.mention} {msg}")
-        print(f"[CHANNEL NOTICE] Sent in channel for {user} ({user.id}) -> {msg}", flush=True)
-    except Exception as e:
-        print(f"[ERROR] Could not send fallback message: {e}", flush=True)
+    inter = getattr(message, "interaction", None)
+    if inter:
+        return inter
+    return getattr(message, "interaction_metadata", None)
 
 # ----------------------------
 # Events
@@ -84,28 +79,22 @@ async def on_ready():
     load_data()
     try:
         if GUILD_ID:
-            guild = discord.Object(id=GUILD_ID)
-            synced = await tree.sync(guild=guild)
-            print(f"📜 Slash commands synced instantly to guild {GUILD_ID}", flush=True)
+            synced = await tree.sync(guild=discord.Object(id=GUILD_ID))
+            print(f"📜 Slash commands synced instantly to guild {GUILD_ID}")
+            for cmd in synced:
+                print(f"   ⏺️ /{cmd.name}")
         else:
             synced = await tree.sync()
-            print("📜 Slash commands synced globally (may take up to 1 hour).", flush=True)
-
-        # Log all registered commands
-        print("✅ Registered Slash Commands:")
-        for cmd in synced:
-            print(f"   • /{cmd.name} → {cmd.description}")
+            print("📜 Slash commands synced globally (may take up to 1 hour).")
     except Exception as e:
-        print(f"❌ Error syncing commands: {e}", flush=True)
+        print(f"❌ Error syncing commands: {e}")
 
-    print(f"✅ Logged in as {client.user} ({client.user.id})", flush=True)
+    print(f"✅ Logged in as {client.user} ({client.user.id})")
 
 @client.event
 async def on_message(message: discord.Message):
     if message.author.id == client.user.id:
         return
-
-    print(f"[DEBUG] From {message.author} ({message.author.id}) content={repr(message.content)}", flush=True)
 
     if message.author.bot and message.author.id == MAZOKU_BOT_ID:
         inter = get_interaction_from_message(message)
@@ -115,86 +104,110 @@ async def on_message(message: discord.Message):
         cmd_name = getattr(inter, "name", None)
         user = getattr(inter, "user", None)
 
-        if cmd_name == "open-boxes":
-            display_name = "Refreshing Box"
-        elif cmd_name == "summer":
-            display_name = "summer"
-        elif cmd_name == "summon":
-            display_name = "summon"
-        elif cmd_name == "premium-pack":
-            display_name = "Premium Pack"
-        else:
-            return
+        if cmd_name in ALIASES and user:
+            display_name = ALIASES[cmd_name]
+            now = time.time()
+            key = f"{user.id}:{display_name}"
+            end = data["cooldowns"].get(key, 0)
 
-        if not user:
-            return
+            if end > now:
+                remaining = int(end - now)
+                try:
+                    await message.channel.send(
+                        f"⏳ {user.mention}, you're still on cooldown for **{display_name}** ({remaining}s left)."
+                    )
+                except Exception:
+                    pass
+                return
 
-        now = time.time()
-        key = (str(user.id), display_name)
-        end = cooldowns.get(str(key), 0)
+            cd = COOLDOWN_SECONDS[display_name]
+            data["cooldowns"][key] = now + cd
+            save_data()
 
-        if end > now:
-            remaining = int(end - now)
-            await send_dm_or_channel(user, message.channel, f"⏳ You’re still on cooldown for {display_name} ({remaining}s left).")
-            return
+            user_settings = get_user_settings(user.id)
+            if user_settings.get("dm", True):
+                try:
+                    await user.send(
+                        f"⚡ Cooldown started for **{display_name}** — I'll remind you in {cd} seconds."
+                    )
+                except discord.Forbidden:
+                    await message.channel.send(
+                        f"⚡ {user.mention}, cooldown started for **{display_name}** — I'll remind you in {cd} seconds. (Couldn't DM you)"
+                    )
+            else:
+                await message.channel.send(
+                    f"⚡ {user.mention}, cooldown started for **{display_name}** — I'll remind you in {cd} seconds."
+                )
 
-        cd = COOLDOWN_SECONDS[display_name]
-        cooldowns[str(key)] = now + cd
-        save_data()
-
-        await send_dm_or_channel(user, message.channel, f"⚡ Cooldown started for {display_name} — I’ll remind you in {cd} seconds.")
-
-        async def clear_later():
             await asyncio.sleep(cd)
-            if cooldowns.get(str(key), 0) <= time.time():
-                cooldowns.pop(str(key), None)
+            if data["cooldowns"].get(key, 0) <= time.time():
+                data["cooldowns"].pop(key, None)
                 save_data()
-                await send_dm_or_channel(user, message.channel, f"✅ Cooldown for {display_name} is over — you can use it again.")
-
-        client.loop.create_task(clear_later())
+                try:
+                    if user_settings.get("dm", True):
+                        await user.send(f"✅ Your cooldown for **{display_name}** is over!")
+                    else:
+                        await message.channel.send(
+                            f"✅ {user.mention}, cooldown for **{display_name}** is over!"
+                        )
+                except discord.Forbidden:
+                    await message.channel.send(
+                        f"✅ {user.mention}, cooldown for **{display_name}** is over! (Couldn't DM you)"
+                    )
 
 # ----------------------------
 # Slash Commands
 # ----------------------------
-@tree.command(name="setcooldown", description="Set a cooldown time for a command (seconds).")
+@tree.command(
+    name="setcooldown",
+    description="Set a cooldown time for a command (seconds).",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
 async def set_cooldown(interaction: discord.Interaction, command: str, seconds: int):
-    if command not in COOLDOWN_SECONDS:
-        await interaction.response.send_message(f"❌ Unknown command `{command}`", ephemeral=True)
+    if seconds < 0:
+        await interaction.response.send_message("❌ Cooldown must be >= 0.", ephemeral=True)
         return
     COOLDOWN_SECONDS[command] = seconds
-    save_data()
-    await interaction.response.send_message(f"✅ Cooldown for {command} updated to {seconds} seconds.", ephemeral=True)
+    await interaction.response.send_message(
+        f"✅ Cooldown for **{command}** updated to {seconds} seconds.", ephemeral=True
+    )
 
-@tree.command(name="checkcooldowns", description="Check your active cooldowns")
+@tree.command(
+    name="checkcooldowns",
+    description="Check your active cooldowns.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
 async def check_cooldowns(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
     now = time.time()
     active = []
-    for key, end_time in list(cooldowns.items()):
-        uid, cmd = eval(key)  # stored as str((user_id, cmd))
-        if uid == user_id and end_time > now:
-            active.append(f"{cmd}: {int(end_time - now)}s")
-
+    for key, end in data["cooldowns"].items():
+        uid, cmd = key.split(":", 1)
+        if uid == str(interaction.user.id) and end > now:
+            active.append(f"{cmd}: {int(end - now)}s")
     if not active:
         await interaction.response.send_message("✅ You have no active cooldowns!", ephemeral=True)
     else:
-        await interaction.response.send_message("⏳ Your active cooldowns:\n" + "\n".join(active), ephemeral=True)
+        await interaction.response.send_message(
+            "⏳ Your active cooldowns:\n" + "\n".join(active), ephemeral=True
+        )
 
-@tree.command(name="settings", description="Change your bot settings")
+@tree.command(
+    name="settings",
+    description="Enable or disable DM reminders.",
+    guild=discord.Object(id=GUILD_ID) if GUILD_ID else None,
+)
+@discord.app_commands.describe(dm="Enable (true) or disable (false) DMs")
 async def settings(interaction: discord.Interaction, dm: bool):
-    uid = str(interaction.user.id)
-    if uid not in user_settings:
-        user_settings[uid] = {}
-    user_settings[uid]["dm"] = dm
-    save_data()
-    await interaction.response.send_message(f"✅ DM reminders set to {dm}.", ephemeral=True)
+    set_user_settings(interaction.user.id, {"dm": dm})
+    state = "enabled" if dm else "disabled"
+    await interaction.response.send_message(f"✅ DMs are now **{state}**.", ephemeral=True)
 
 # ----------------------------
 # Run
 # ----------------------------
 if __name__ == "__main__":
     if not TOKEN:
-        print("❌ DISCORD_TOKEN not set!", flush=True)
+        print("❌ DISCORD_TOKEN not set!")
         raise SystemExit(1)
-    print("🚀 Starting bot...", flush=True)
+    print("🚀 Starting bot...")
     client.run(TOKEN)
