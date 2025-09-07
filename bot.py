@@ -15,34 +15,54 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 
-# cooldown config
+# ----------------------------
+# CONFIG
+# ----------------------------
 COOLDOWN_SECONDS = {
     "Refreshing Box": 60,
     "summer": 1800,
     "summon": 1800,
     "Premium Pack": 60,
 }
-
-# aliases mapping
-ALIASES = {
+COMMAND_ALIASES = {
     "open-boxes": "Refreshing Box",
-    "Refreshing Box": "Refreshing Box",
     "summer": "summer",
     "summon": "summon",
-    "Premium Pack": "Premium Pack",
     "open": "Premium Pack",
 }
-
 cooldowns = {}
 
+# ----------------------------
+# SAFE SEND HELPER
+# ----------------------------
+async def safe_send(target, content: str, retries: int = 3, delay: float = 1.0):
+    """
+    Safely send a message to target (channel or DM).
+    Retries on rate-limit or temporary failure.
+    """
+    for attempt in range(retries):
+        try:
+            return await target.send(content)
+        except discord.Forbidden:
+            raise  # DM blocked, caller should fallback
+        except discord.HTTPException as e:
+            if attempt < retries - 1:
+                await asyncio.sleep(delay * (attempt + 1))  # backoff
+            else:
+                print(f"❌ Failed to send message after {retries} retries: {e}", flush=True)
 
+# ----------------------------
+# UTILS
+# ----------------------------
 def get_interaction_from_message(message: discord.Message):
     inter = getattr(message, "interaction", None)
     if inter:
         return inter
     return getattr(message, "interaction_metadata", None)
 
-
+# ----------------------------
+# EVENTS
+# ----------------------------
 @client.event
 async def on_ready():
     try:
@@ -63,102 +83,89 @@ async def on_message(message: discord.Message):
     if message.author.id == client.user.id:
         return
 
+    # DEBUG
+    print(
+        f"[DEBUG] From {message.author} ({message.author.id}) content={repr(message.content)}",
+        flush=True,
+    )
+
     if message.author.bot and message.author.id == MAZOKU_BOT_ID:
         inter = get_interaction_from_message(message)
-        cmd_name, user = None, None
-
-        if inter:
-            cmd_name = getattr(inter, "name", None)
-            user = getattr(inter, "user", None)
-        elif message.embeds:
-            title = message.embeds[0].title or ""
-            cmd_name = title
-            if message.mentions:
-                user = message.mentions[0]
-
-        if not cmd_name or not user:
+        if not inter:
             return
 
-        canonical = ALIASES.get(cmd_name)
-        if not canonical or canonical not in COOLDOWN_SECONDS:
+        raw_cmd = getattr(inter, "name", None)
+        user = getattr(inter, "user", None)
+
+        if not raw_cmd or not user:
             return
 
-        # 🚫 check for "fail" responses (skip cooldowns)
-        error_texts = [
-            "No boxes available to open",
-            "You don’t have any boxes",
-        ]
-        msg_text = (message.content or "").strip()
-        embed_text = ""
-        if message.embeds:
-            embed_text = (message.embeds[0].description or "").strip()
-
-        if any(err in msg_text for err in error_texts) or any(err in embed_text for err in error_texts):
-            print(f"⚠️ Skipping cooldown for {canonical} because Mazoku said: {msg_text or embed_text}", flush=True)
+        cmd_name = COMMAND_ALIASES.get(raw_cmd, raw_cmd)
+        if cmd_name not in COOLDOWN_SECONDS:
             return
 
-        # cooldown check
+        # check for failure text like "No boxes available"
+        if any("no boxes available" in embed.description.lower()
+               for embed in message.embeds if embed.description):
+            print(f"⚠️ Skipping cooldown for {user} because action failed.", flush=True)
+            return
+
         now = time.time()
-        key = (user.id, canonical)
+        key = (user.id, cmd_name)
         end = cooldowns.get(key, 0)
 
         if end > now:
             remaining = int(end - now)
             try:
-                await user.send(f"⏳ You're still on cooldown for **{canonical}** ({remaining}s left).")
+                await safe_send(user, f"⏳ Cooldown still active for `{cmd_name}` — {remaining}s left.")
             except discord.Forbidden:
-                await message.channel.send(
-                    f"⏳ {user.mention}, you're still on cooldown for **{canonical}** ({remaining}s left). (Couldn't DM you)"
-                )
+                await safe_send(message.channel, f"⏳ {user.mention}, cooldown still active for `{cmd_name}` — {remaining}s left.")
             return
 
         # start cooldown
-        cd = COOLDOWN_SECONDS[canonical]
+        cd = COOLDOWN_SECONDS[cmd_name]
         cooldowns[key] = now + cd
         try:
-            await user.send(f"⚡ Cooldown started for **{canonical}** — I'll remind you in {cd} seconds.")
+            await safe_send(user, f"⚡ Cooldown started for `{cmd_name}` — I'll remind you in {cd} seconds.")
         except discord.Forbidden:
-            await message.channel.send(
-                f"⚡ {user.mention}, cooldown started for **{canonical}** — I'll remind you in {cd} seconds. (Couldn't DM you)"
-            )
+            await safe_send(message.channel, f"⚡ {user.mention}, cooldown started for `{cmd_name}` — I'll remind you in {cd} seconds.")
 
-        # reminder later
         await asyncio.sleep(cd)
         if cooldowns.get(key, 0) <= time.time():
             cooldowns.pop(key, None)
             try:
-                await user.send(f"✅ Your cooldown for **{canonical}** is over — you can use it again.")
+                await safe_send(user, f"✅ Your cooldown for `{cmd_name}` is over!")
             except discord.Forbidden:
-                await message.channel.send(
-                    f"✅ {user.mention}, cooldown for **{canonical}** is over! (Couldn't DM you.)"
-                )
+                await safe_send(message.channel, f"✅ {user.mention}, cooldown for `{cmd_name}` is over!")
 
-
-# Slash commands
+# ----------------------------
+# SLASH COMMANDS
+# ----------------------------
 @tree.command(name="setcooldown", description="Set a cooldown time for a command (seconds).")
 async def set_cooldown(interaction: discord.Interaction, command: str, seconds: int):
     if seconds < 0:
         await interaction.response.send_message("❌ Cooldown must be >= 0.", ephemeral=True)
         return
     COOLDOWN_SECONDS[command] = seconds
-    await interaction.response.send_message(f"✅ Cooldown for **{command}** updated to {seconds} seconds.", ephemeral=True)
-
+    await interaction.response.send_message(f"✅ Cooldown for `{command}` updated to {seconds} seconds.", ephemeral=True)
 
 @tree.command(name="checkcooldowns", description="Check your active cooldowns")
 async def check_cooldowns(interaction: discord.Interaction):
     user_id = interaction.user.id
     now = time.time()
     active = []
-    for (uid, cmd), end_time in list(cooldowns.items()):
+    for (uid, cmd), end_time in cooldowns.items():
         if uid == user_id and end_time > now:
             active.append(f"{cmd}: {int(end_time - now)}s")
 
     if not active:
         await interaction.response.send_message("✅ You have no active cooldowns!", ephemeral=True)
     else:
-        await interaction.response.send_message("⏳ Your active cooldowns:\n" + "\n".join(active), ephemeral=True)
+        await interaction.response.send_message("⏳ Active cooldowns:\n" + "\n".join(active), ephemeral=True)
 
-
+# ----------------------------
+# RUN
+# ----------------------------
 if __name__ == "__main__":
     if not TOKEN:
         print("❌ DISCORD_TOKEN not set!", flush=True)
