@@ -17,7 +17,7 @@ tree = discord.app_commands.CommandTree(client)
 
 # per-command default cooldowns (seconds)
 COOLDOWN_SECONDS = {
-    "open-boxes": 60,
+    "Refreshing Box": 60,
     "summer": 1800,
 }
 
@@ -88,7 +88,7 @@ async def on_message(message: discord.Message):
             cd = COOLDOWN_SECONDS[cmd_name]
             cooldowns[key] = now + cd
             try:
-                await message.channel.send(f"⚡ {user.mention}, cooldown started for `/{cmd_name}` — I'll remind you in {cd} seconds.")
+                await message.channel.send(f"⚡ {user.mention}, cooldown started for `{cmd_name}` — I'll remind you in {cd} seconds.")
             except Exception:
                 pass
 
@@ -97,11 +97,11 @@ async def on_message(message: discord.Message):
             if cooldowns.get(key, 0) <= time.time():
                 cooldowns.pop(key, None)
                 try:
-                    await user.send(f"✅ Your cooldown for `/{cmd_name}` is over — you can use it again.")
+                    await user.send(f"✅ Your cooldown for `{cmd_name}` is over — you can use it again.")
                 except discord.Forbidden:
                     # fallback to channel if DMs are blocked
                     try:
-                        await message.channel.send(f"✅ {user.mention}, cooldown for `/{cmd_name}` is over! (Couldn't DM you.)")
+                        await message.channel.send(f"✅ {user.mention}, cooldown for `{cmd_name}` is over! (Couldn't DM you.)")
                     except Exception:
                         pass
 
