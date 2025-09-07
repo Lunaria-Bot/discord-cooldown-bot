@@ -60,7 +60,6 @@ def get_interaction_from_message(message: discord.Message):
 
 async def send_dm_or_channel(user: discord.User, channel: discord.TextChannel, msg: str):
     """Try to DM user, fallback to channel if DMs blocked. Logs success/fail."""
-    # DM preference: default True
     dm_enabled = user_settings.get(str(user.id), {}).get("dm", True)
 
     if dm_enabled:
@@ -71,7 +70,6 @@ async def send_dm_or_channel(user: discord.User, channel: discord.TextChannel, m
         except discord.Forbidden:
             print(f"[DM FAIL] Cannot DM {user} ({user.id}), falling back.", flush=True)
 
-    # fallback
     try:
         await channel.send(f"{user.mention} {msg}")
         print(f"[CHANNEL NOTICE] Sent in channel for {user} ({user.id}) -> {msg}", flush=True)
@@ -86,11 +84,17 @@ async def on_ready():
     load_data()
     try:
         if GUILD_ID:
-            await tree.sync(guild=discord.Object(id=GUILD_ID))
-            print(f"📜 Slash commands synced to guild {GUILD_ID}", flush=True)
+            guild = discord.Object(id=GUILD_ID)
+            synced = await tree.sync(guild=guild)
+            print(f"📜 Slash commands synced instantly to guild {GUILD_ID}", flush=True)
         else:
-            await tree.sync()
-            print("📜 Slash commands synced globally.", flush=True)
+            synced = await tree.sync()
+            print("📜 Slash commands synced globally (may take up to 1 hour).", flush=True)
+
+        # Log all registered commands
+        print("✅ Registered Slash Commands:")
+        for cmd in synced:
+            print(f"   • /{cmd.name} → {cmd.description}")
     except Exception as e:
         print(f"❌ Error syncing commands: {e}", flush=True)
 
@@ -101,7 +105,6 @@ async def on_message(message: discord.Message):
     if message.author.id == client.user.id:
         return
 
-    # Debug logging for everything bot sees
     print(f"[DEBUG] From {message.author} ({message.author.id}) content={repr(message.content)}", flush=True)
 
     if message.author.bot and message.author.id == MAZOKU_BOT_ID:
@@ -112,7 +115,6 @@ async def on_message(message: discord.Message):
         cmd_name = getattr(inter, "name", None)
         user = getattr(inter, "user", None)
 
-        # Map aliases
         if cmd_name == "open-boxes":
             display_name = "Refreshing Box"
         elif cmd_name == "summer":
