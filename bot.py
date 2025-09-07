@@ -5,7 +5,7 @@ import os
 import time
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", 0))   # set this to your server ID for instant sync
+GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", 0))   # optional: force-sync to one guild
 MAZOKU_BOT_ID = 1242388858897956906                # replace if different
 
 intents = discord.Intents.default()
@@ -18,13 +18,11 @@ tree = discord.app_commands.CommandTree(client)
 # ----------------------------
 # Aliases & cooldowns
 # ----------------------------
-# mapping of pretty name -> actual Mazoku interaction name
 COMMAND_ALIASES = {
     "Refreshing Box": "open-boxes",
     "Summer": "summer",
 }
 
-# actual cooldowns stored by interaction name
 COOLDOWN_SECONDS = {
     "open-boxes": 60,
     "summer": 1800,
@@ -37,19 +35,27 @@ cooldowns = {}
 # Utility helpers
 # ----------------------------
 def get_interaction_from_message(message: discord.Message):
-    # compatibility: prefer message.interaction, fall back to interaction_metadata
     inter = getattr(message, "interaction", None)
     if inter:
         return inter
     return getattr(message, "interaction_metadata", None)
 
-
 def get_display_name(cmd_name: str) -> str:
-    """Convert raw interaction name -> pretty alias if available."""
     for pretty, actual in COMMAND_ALIASES.items():
         if actual == cmd_name:
             return pretty
-    return cmd_name  # fallback to raw
+    return cmd_name
+
+
+async def safe_dm(user: discord.User, fallback_channel: discord.TextChannel, text: str):
+    """Try to DM, fall back to channel if DMs blocked"""
+    try:
+        await user.send(text)
+    except discord.Forbidden:
+        try:
+            await fallback_channel.send(f"{user.mention} {text}")
+        except Exception:
+            print(f"⚠️ Could not DM or send in channel for {user}", flush=True)
 
 
 # ----------------------------
@@ -100,67 +106,47 @@ async def on_message(message: discord.Message):
 
             if end > now:
                 remaining = int(end - now)
-                try:
-                    await message.channel.send(
-                        f"⏳ {user.mention}, you're still on cooldown for "
-                        f"`/{get_display_name(cmd_name)}` ({remaining}s left)."
-                    )
-                except Exception:
-                    pass
+                await safe_dm(
+                    user,
+                    message.channel,
+                    f"⏳ You're still on cooldown for `{get_display_name(cmd_name)}` ({remaining}s left)."
+                )
                 return
 
-            # start cooldown
+            # Start cooldown
             cd = COOLDOWN_SECONDS[cmd_name]
             cooldowns[key] = now + cd
-            try:
-                await message.channel.send(
-                    f"⚡ {user.mention}, cooldown started for "
-                    f"`/{get_display_name(cmd_name)}` — I'll remind you in {cd} seconds."
-                )
-            except Exception:
-                pass
+            await safe_dm(
+                user,
+                message.channel,
+                f"⚡ Cooldown started for `{get_display_name(cmd_name)}` — I'll remind you in {cd} seconds."
+            )
 
-            # Sleep then clear and notify
+            # Sleep then notify
             await asyncio.sleep(cd)
             if cooldowns.get(key, 0) <= time.time():
                 cooldowns.pop(key, None)
-                try:
-                    await user.send(
-                        f"✅ Your cooldown for `/{get_display_name(cmd_name)}` is over — you can use it again."
-                    )
-                except discord.Forbidden:
-                    try:
-                        await message.channel.send(
-                            f"✅ {user.mention}, cooldown for `/{get_display_name(cmd_name)}` is over! (Couldn't DM you.)"
-                        )
-                    except Exception:
-                        pass
+                await safe_dm(
+                    user,
+                    message.channel,
+                    f"✅ Your cooldown for `{get_display_name(cmd_name)}` is over — you can use it again."
+                )
 
 
 # ----------------------------
 # Slash commands
 # ----------------------------
 @tree.command(name="setcooldown", description="Set a cooldown time for a command (seconds). Admins only recommended.")
-@discord.app_commands.describe(command="Command name (alias or real)", seconds="Seconds")
+@discord.app_commands.describe(command="Command name (e.g. open-boxes, summer)", seconds="Seconds")
 async def set_cooldown(interaction: discord.Interaction, command: str, seconds: int):
     if seconds < 0:
         await interaction.response.send_message("❌ Cooldown must be >= 0.", ephemeral=True)
         return
 
-    # resolve alias if necessary
-    cmd_name = COMMAND_ALIASES.get(command, command)
-
-    if cmd_name not in COOLDOWN_SECONDS:
-        await interaction.response.send_message(
-            f"❌ Unknown command `{command}`. Valid: {list(COMMAND_ALIASES.keys())}",
-            ephemeral=True,
-        )
-        return
-
-    COOLDOWN_SECONDS[cmd_name] = seconds
+    COOLDOWN_SECONDS[command] = seconds
     await interaction.response.send_message(
-        f"✅ Cooldown for `/{get_display_name(cmd_name)}` updated to {seconds} seconds.",
-        ephemeral=True,
+        f"✅ Cooldown for `{command}` updated to {seconds} seconds.",
+        ephemeral=True
     )
 
 
@@ -171,12 +157,15 @@ async def check_cooldowns(interaction: discord.Interaction):
     active = []
     for (uid, cmd), end_time in list(cooldowns.items()):
         if uid == user_id and end_time > now:
-            active.append(f"/{get_display_name(cmd)}: {int(end_time - now)}s")
+            active.append(f"{get_display_name(cmd)}: {int(end_time - now)}s")
 
     if not active:
         await interaction.response.send_message("✅ You have no active cooldowns!", ephemeral=True)
     else:
-        await interaction.response.send_message("⏳ Your active cooldowns:\n" + "\n".join(active), ephemeral=True)
+        await interaction.response.send_message(
+            "⏳ Your active cooldowns:\n" + "\n".join(active),
+            ephemeral=True
+        )
 
 
 # ----------------------------
