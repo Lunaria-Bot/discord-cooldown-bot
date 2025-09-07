@@ -52,3 +52,9 @@ async def on_message(message: discord.Message):
                             )
                         finally:
                             cooldowns.pop(claimed_by, None)
+if __name__ == "__main__":
+    try:
+        print("🚀 Starting bot...", flush=True)
+        client.run(TOKEN)
+    except Exception as e:
+        print(f"❌ Failed to start bot: {e}", flush=True)
