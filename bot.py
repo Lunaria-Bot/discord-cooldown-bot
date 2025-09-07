@@ -23,8 +23,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ----------------------------
 def load_data():
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(DATA_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
     return {
         "cooldowns": {},
         "settings": {},
@@ -42,7 +45,11 @@ def save_data():
 data = load_data()
 
 def get_user_settings(user_id):
-    return data["settings"].get(str(user_id), {"dm_enabled": True})
+    uid = str(user_id)
+    if uid not in data["settings"]:
+        data["settings"][uid] = {"dm_enabled": True}
+        save_data()
+    return data["settings"][uid]
 
 # ----------------------------
 # Utility
@@ -90,6 +97,9 @@ async def start_cooldown(user, cmd_name, cd_seconds, channel):
 # ----------------------------
 @bot.event
 async def on_ready():
+    global data
+    data = load_data()  # ensure fresh load at startup
+
     guild = None
     if GUILD_ID:
         guild = discord.Object(id=GUILD_ID)
@@ -157,15 +167,11 @@ async def on_message(message: discord.Message):
 @discord.app_commands.describe(dm="Enable or disable DM reminders (true/false). Leave empty to view current setting.")
 async def settings(interaction: discord.Interaction, dm: bool = None):
     uid = str(interaction.user.id)
-
-    # Initialize if not present
-    if uid not in data["settings"]:
-        data["settings"][uid] = {"dm_enabled": True}
+    current_settings = get_user_settings(uid)
 
     if dm is None:
-        current = data["settings"][uid].get("dm_enabled", True)
         await interaction.response.send_message(
-            f"🔧 Your DM reminders are currently **{'enabled' if current else 'disabled'}**.",
+            f"🔧 Your DM reminders are currently **{'enabled' if current_settings['dm_enabled'] else 'disabled'}**.",
             ephemeral=True
         )
     else:
