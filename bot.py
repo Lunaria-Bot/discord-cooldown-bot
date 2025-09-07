@@ -17,12 +17,32 @@ DATA_FILE = "botdata.json"
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    return {"cooldowns": {}, "settings": {}, "default_cooldowns": {
-        "Refreshing Box": 60,
-        "Summon": 1800,
-        "Premium Pack": 60
-    }}
+            d = json.load(f)
+    else:
+        d = {}
+
+    # Ensure structure
+    if "cooldowns" not in d:
+        d["cooldowns"] = {}
+    if "settings" not in d:
+        d["settings"] = {}
+    if "default_cooldowns" not in d:
+        d["default_cooldowns"] = {
+            "Refreshing Box": 60,
+            "Summon": 1800,
+            "Premium Pack": 60,
+        }
+
+    # Clean expired cooldowns
+    now = discord.utils.utcnow().timestamp()
+    for uid in list(d["cooldowns"].keys()):
+        for cmd, expiry in list(d["cooldowns"][uid].items()):
+            if expiry <= now:
+                del d["cooldowns"][uid][cmd]
+        if not d["cooldowns"][uid]:
+            del d["cooldowns"][uid]
+
+    return d
 
 def save_data():
     with open(DATA_FILE, "w") as f:
@@ -31,17 +51,15 @@ def save_data():
 data = load_data()
 
 # ---------------- Helper ----------------
-async def start_cooldown(user, command, duration, channel):
+async def start_cooldown(user: discord.User, command: str, duration: int, channel: discord.TextChannel):
     user_id = str(user.id)
     if user_id not in data["cooldowns"]:
         data["cooldowns"][user_id] = {}
 
-    # Save expiry timestamp
     expires_at = discord.utils.utcnow().timestamp() + duration
     data["cooldowns"][user_id][command] = expires_at
     save_data()
 
-    # DM or fallback to channel
     dm_enabled = data["settings"].get(user_id, {}).get("dm_enabled", True)
     reminder_msg = f"⚡ {user.mention}, cooldown started for **{command}** — I’ll remind you in {duration} seconds."
 
@@ -53,8 +71,15 @@ async def start_cooldown(user, command, duration, channel):
     except discord.Forbidden:
         await channel.send(reminder_msg)
 
-    # Wait and remind
     await asyncio.sleep(duration)
+    # Clean after expiry
+    if user_id in data["cooldowns"] and command in data["cooldowns"][user_id]:
+        if data["cooldowns"][user_id][command] <= discord.utils.utcnow().timestamp():
+            del data["cooldowns"][user_id][command]
+            if not data["cooldowns"][user_id]:
+                del data["cooldowns"][user_id]
+            save_data()
+
     try:
         if dm_enabled:
             await user.send(f"⏰ {command} cooldown expired — you can use it again!")
@@ -66,49 +91,49 @@ async def start_cooldown(user, command, duration, channel):
 # ---------------- Events ----------------
 @bot.event
 async def on_ready():
-    guild = discord.Object(id=1399784437440319508)  # your test guild
+    guild = discord.Object(id=1399784437440319508)  # your guild ID
     await bot.tree.sync(guild=guild)
     print(f"📜 Slash commands synced instantly to guild {guild.id}")
     print(f"✅ Logged in as {bot.user} ({bot.user.id})")
 
 @bot.event
 async def on_message(message: discord.Message):
-    # Only check Mazoku bot messages
     if message.author.bot and message.author.name == "Mazoku":
         if message.embeds:
             embed = message.embeds[0]
-            # ❌ Ignore cooldown if no box was opened
             if embed.description and "No boxes available to open" in embed.description:
                 return  
 
-        if message.interaction and message.interaction.user:
-            user = message.interaction.user
-            await start_cooldown(user, "Refreshing Box", 60, message.channel)
+        inter_meta = getattr(message, "interaction_metadata", None)
+        if inter_meta and inter_meta.user:
+            await start_cooldown(inter_meta.user, "Refreshing Box", 60, message.channel)
 
     await bot.process_commands(message)
 
 # ---------------- Slash Commands ----------------
-@bot.tree.command(description="Check your active cooldowns")
+@bot.tree.command(description="Check your active cooldowns", guild=discord.Object(id=1399784437440319508))
 async def checkcooldowns(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     now = discord.utils.utcnow().timestamp()
     cooldowns = data["cooldowns"].get(user_id, {})
 
-    if not cooldowns:
-        await interaction.response.send_message("✅ You have no active cooldowns.", ephemeral=True)
-        return
-
     msg_lines = []
-    for cmd, expiry in cooldowns.items():
+    for cmd, expiry in list(cooldowns.items()):
         remaining = int(expiry - now)
         if remaining > 0:
             msg_lines.append(f"⏳ **{cmd}**: {remaining}s remaining")
+        else:
+            del data["cooldowns"][user_id][cmd]
+    if user_id in data["cooldowns"] and not data["cooldowns"][user_id]:
+        del data["cooldowns"][user_id]
+    save_data()
+
     if not msg_lines:
         msg_lines = ["✅ You have no active cooldowns."]
 
     await interaction.response.send_message("\n".join(msg_lines), ephemeral=True)
 
-@bot.tree.command(description="Set a cooldown time for a command (seconds). Admins only.")
+@bot.tree.command(description="Set a cooldown time for a command (seconds). Admins only.", guild=discord.Object(id=1399784437440319508))
 @app_commands.describe(command="Command name", seconds="Cooldown time in seconds")
 async def setcooldown(interaction: discord.Interaction, command: str, seconds: int):
     if not interaction.user.guild_permissions.administrator:
@@ -119,7 +144,7 @@ async def setcooldown(interaction: discord.Interaction, command: str, seconds: i
     save_data()
     await interaction.response.send_message(f"✅ Default cooldown for **{command}** set to {seconds} seconds.")
 
-@bot.tree.command(description="Change your personal settings")
+@bot.tree.command(description="Change your personal settings", guild=discord.Object(id=1399784437440319508))
 @app_commands.describe(dm="Enable or disable DM reminders (true/false)")
 async def settings(interaction: discord.Interaction, dm: bool):
     user_id = str(interaction.user.id)
@@ -129,14 +154,15 @@ async def settings(interaction: discord.Interaction, dm: bool):
     save_data()
     await interaction.response.send_message(f"✅ DM reminders {'enabled' if dm else 'disabled'}.", ephemeral=True)
 
-@bot.tree.command(description="Reload bot settings from file (Admin only)")
+@bot.tree.command(description="Reload bot settings from file (Admin only)", guild=discord.Object(id=1399784437440319508))
 async def reload(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ Admin only command.", ephemeral=True)
         return
     global data
     data = load_data()
-    await interaction.response.send_message("🔄 Settings reloaded from file.", ephemeral=True)
+    save_data()
+    await interaction.response.send_message("🔄 Settings reloaded & expired cooldowns cleaned.", ephemeral=True)
 
 # ---------------- Run ----------------
 bot.run("YOUR_BOT_TOKEN")
