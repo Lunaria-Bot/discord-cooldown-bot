@@ -1,20 +1,17 @@
 import discord
 import asyncio
 import os
-import time
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-
+OTHER_BOT_ID = 123456789012345678  # <-- Replace with Mazoku bot's real ID
 COOLDOWN_SECONDS = 60
-OTHER_BOT_ID = 142938885889795696  # Mazoku bot ID
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True  # needed for DMs
+intents.members = True
 
 client = discord.Client(intents=intents)
 
-# Track cooldowns: user_id -> timestamp
 cooldowns = {}
 
 @client.event
@@ -24,55 +21,34 @@ async def on_ready():
 @client.event
 async def on_message(message: discord.Message):
     if message.author.id == client.user.id:
-        return  # ignore itself
+        return  # ignore self
 
+    # Debug print
+    print(f"📩 Message from {message.author}: {message.content} | Embeds: {len(message.embeds)}")
+
+    # Only react to Mazoku bot
     if message.author.id == OTHER_BOT_ID:
-        # Look for "Refreshing Box Opened" in Mazoku's embed
-        if message.embeds and "Refreshing Box Opened" in message.embeds[0].title:
+        if message.embeds:
             embed = message.embeds[0]
+            if embed.title and "Refreshing Box Opened" in embed.title:
+                claimed_by = None
+                if embed.description and "Claimed By" in embed.description:
+                    parts = embed.description.split()
+                    if len(parts) >= 3:
+                        claimed_by = parts[2]
 
-            claimed_by = None
-            if embed.description and "Claimed By" in embed.description:
-                for user in message.mentions:
-                    if user.mention in embed.description:
-                        claimed_by = user
-                        break
+                if claimed_by:
+                    print(f"🎯 Detected box opened by {claimed_by}")
 
-            if claimed_by:
-                now = time.time()
-                cooldown_end = cooldowns.get(claimed_by.id, 0)
-
-                if now < cooldown_end:
-                    # Still on cooldown
-                    remaining = int(cooldown_end - now)
-                    try:
-                        await claimed_by.send(
-                            f"⚠️ You’re still on cooldown for {remaining} seconds!"
-                        )
-                    except discord.Forbidden:
-                        await message.channel.send(
-                            f"⚠️ {claimed_by.mention}, I couldn’t DM you. Please enable DMs."
-                        )
-                else:
-                    # Start cooldown
-                    cooldowns[claimed_by.id] = now + COOLDOWN_SECONDS
-                    try:
-                        await claimed_by.send(
-                            f"⏳ Cooldown started! I’ll remind you in {COOLDOWN_SECONDS} seconds."
-                        )
-                    except discord.Forbidden:
-                        await message.channel.send(
-                            f"⚠️ {claimed_by.mention}, I couldn’t DM you. Please enable DMs."
-                        )
-
-                    await asyncio.sleep(COOLDOWN_SECONDS)
-
-                    try:
-                        await claimed_by.send(
-                            f"✅ Cooldown is over! You can open a box again."
-                        )
-                    except discord.Forbidden:
-                        await message.channel.send(
-                            f"✅ {claimed_by.mention}, cooldown is over (DMs blocked)."
-                        )
-
+                    if claimed_by not in cooldowns:
+                        cooldowns[claimed_by] = True
+                        try:
+                            await message.channel.send(
+                                f"⏳ {claimed_by}, cooldown started! I'll remind you in {COOLDOWN_SECONDS} seconds."
+                            )
+                            await asyncio.sleep(COOLDOWN_SECONDS)
+                            await message.channel.send(
+                                f"✅ {claimed_by}, cooldown is over! You can open the box again."
+                            )
+                        finally:
+                            cooldowns.pop(claimed_by, None)
