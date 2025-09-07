@@ -1,5 +1,2 @@
-[build]
-builder = "python"
-
 [deploy]
-startCommand = "python bot.py"
+start = "python bot.py"
